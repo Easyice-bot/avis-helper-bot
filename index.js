@@ -29,9 +29,9 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds],
 });
 
-const tempData    = new Map(); // données temporaires en cours de saisie
-const avisData    = new Map(); // stats par helper
-const casierMsgId = new Map(); // dernier message envoyé dans chaque casier
+const tempData    = new Map();
+const avisData    = new Map();
+const casierMsgId = new Map();
 
 // ─── Commande slash ────────────────────────────────────────────────────────
 const commands = [
@@ -54,17 +54,17 @@ client.once('ready', async () => {
 // ─── Interactions ──────────────────────────────────────────────────────────
 client.on('interactionCreate', async (interaction) => {
 
-  // 1. /helperavis → boutons étoiles
+  // 1. /helperavis → boutons étoiles avec le bon nombre d'étoiles
   if (interaction.isChatInputCommand() && interaction.commandName === 'helperavis') {
     const helper = interaction.options.getUser('helper');
     tempData.set(interaction.user.id, { helperId: helper.id });
 
     const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('note_1').setLabel('1⭐').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('note_2').setLabel('2⭐').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('note_3').setLabel('3⭐').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('note_4').setLabel('4⭐').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('note_5').setLabel('5⭐').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('note_1').setLabel('⭐').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('note_2').setLabel('⭐⭐').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('note_3').setLabel('⭐⭐⭐').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('note_4').setLabel('⭐⭐⭐⭐').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('note_5').setLabel('⭐⭐⭐⭐⭐').setStyle(ButtonStyle.Success),
     );
 
     await interaction.reply({
@@ -115,16 +115,16 @@ client.on('interactionCreate', async (interaction) => {
       note === 3 ? 0x00BFFF :
       note === 2 ? 0xFF6600 : 0xFF0000;
 
-    // Embed avis public
+    // ── Embed avis public ──
     const embedAvis = new EmbedBuilder()
       .setTitle('⚔️ AVIS HELPER')
       .setColor(couleur)
       .setImage(BANNIERE)
       .addFields(
-        { name: '🎖️ Helper',      value: `<@${helperId}>`,                              inline: true },
-        { name: '🎮 Joueur aidé', value: `<@${joueur.id}>`,                             inline: true },
-        { name: '⭐ Note',        value: `${etoiles} **${note}/5** — ${medaille}`,      inline: false },
-        { name: '💬 Ressenti',    value: `> ${ressenti}`,                               inline: false },
+        { name: '🎖️ Helper',      value: `<@${helperId}>`,                         inline: true  },
+        { name: '🎮 Joueur aidé', value: `<@${joueur.id}>`,                        inline: true  },
+        { name: '⭐ Note',        value: `${etoiles} **${note}/5** — ${medaille}`, inline: false },
+        { name: '💬 Ressenti',    value: `> ${ressenti}`,                          inline: false },
       )
       .setFooter({ text: `Avis de ${joueur.username} • ${new Date().toLocaleDateString('fr-FR')}`, iconURL: joueur.displayAvatarURL() })
       .setTimestamp();
@@ -134,7 +134,7 @@ client.on('interactionCreate', async (interaction) => {
       embeds: [embedAvis],
     });
 
-    // Mise à jour stats
+    // ── Mise à jour stats ──
     if (!avisData.has(helperId)) {
       avisData.set(helperId, { total: 0, count: 0, notes: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 } });
     }
@@ -143,46 +143,70 @@ client.on('interactionCreate', async (interaction) => {
     stats.count += 1;
     stats.notes[note] += 1;
 
-    // Mise à jour casier
+    // ── Mise à jour casier ──
     const casierID = CASIERS[helperId];
     if (casierID) {
       const casierChannel = interaction.guild.channels.cache.get(casierID);
       if (casierChannel) {
-        const moyenne     = (stats.total / stats.count).toFixed(1);
-        const moyenneEtoi = '⭐'.repeat(Math.round(moyenne)) + '✩'.repeat(5 - Math.round(moyenne));
 
-        // Barre de progression visuelle
+        const moyenne     = (stats.total / stats.count).toFixed(1);
+        const moyRound    = Math.round(moyenne);
+        const moyEtoiles  = '⭐'.repeat(moyRound) + '✩'.repeat(5 - moyRound);
+
+        // Médaille selon moyenne
+        const moyMedaille =
+          moyRound === 5 ? '🥇 EXCELLENT' :
+          moyRound === 4 ? '🥈 TRÈS BON'  :
+          moyRound === 3 ? '🥉 BON'       :
+          moyRound === 2 ? '⚠️ MOYEN'     : '❌ INSUFFISANT';
+
+        // Couleur selon moyenne
+        const moyCouleur =
+          moyRound === 5 ? 0xFFD700 :
+          moyRound === 4 ? 0xFFA500 :
+          moyRound === 3 ? 0x00BFFF :
+          moyRound === 2 ? 0xFF6600 : 0xFF0000;
+
+        // Barre de progression
         const barre = (n) => {
-          const pct = stats.count > 0 ? Math.round((stats.notes[n] / stats.count) * 8) : 0;
-          return '█'.repeat(pct) + '░'.repeat(8 - pct) + ` (${stats.notes[n]})`;
+          const pct = stats.count > 0 ? Math.round((stats.notes[n] / stats.count) * 10) : 0;
+          return `${'⭐'.repeat(n)}  ${'▰'.repeat(pct)}${'▱'.repeat(10 - pct)}  **${stats.notes[n]}** avis`;
         };
 
         const embedCasier = new EmbedBuilder()
-          .setTitle(`📁 Casier Helper`)
-          .setDescription(`<@${helperId}> — **${stats.count}** avis · Moyenne **${moyenne}/5** ${moyenneEtoi}`)
-          .setColor(0xFFD700)
-          .addFields(
-            { name: '5⭐', value: barre(5), inline: false },
-            { name: '4⭐', value: barre(4), inline: false },
-            { name: '3⭐', value: barre(3), inline: false },
-            { name: '2⭐', value: barre(2), inline: false },
-            { name: '1⭐', value: barre(1), inline: false },
+          .setTitle('🏆 FICHE HELPER')
+          .setDescription(
+            `> 👤 <@${helperId}>\n` +
+            `> 📊 **Moyenne : ${moyenne}/5** — ${moyEtoiles}\n` +
+            `> ${moyMedaille} — **${stats.count}** avis au total`
           )
-          .setFooter({ text: `Dernier avis par ${joueur.username} • ${new Date().toLocaleDateString('fr-FR')}` })
+          .setColor(moyCouleur)
+          .addFields(
+            { name: '\u200B', value: '━━━━━━━━━━━━━━━━━━━━━━', inline: false },
+            { name: '📈 Détail des notes', value:
+              `${barre(5)}\n` +
+              `${barre(4)}\n` +
+              `${barre(3)}\n` +
+              `${barre(2)}\n` +
+              `${barre(1)}`,
+              inline: false
+            },
+            { name: '\u200B', value: '━━━━━━━━━━━━━━━━━━━━━━', inline: false },
+            { name: '🕒 Dernier avis reçu', value: `Par <@${joueur.id}> le ${new Date().toLocaleDateString('fr-FR')}`, inline: false },
+          )
+          .setFooter({ text: '🔄 Mis à jour automatiquement à chaque nouvel avis' })
           .setTimestamp();
 
-        // Supprime l'ancien message du casier si existe
+        // Supprime l'ancien message
         const ancienMsgId = casierMsgId.get(helperId);
         if (ancienMsgId) {
           try {
             const ancienMsg = await casierChannel.messages.fetch(ancienMsgId);
             await ancienMsg.delete();
-          } catch (e) {
-            // Message déjà supprimé ou introuvable, on continue
-          }
+          } catch (e) {}
         }
 
-        // Envoie le nouveau message et sauvegarde son ID
+        // Envoie le nouveau
         const nouveauMsg = await casierChannel.send({ embeds: [embedCasier] });
         casierMsgId.set(helperId, nouveauMsg.id);
       }
