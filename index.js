@@ -11,12 +11,17 @@ const {
   EmbedBuilder,
   ButtonBuilder,
   ButtonStyle,
+  PermissionFlagsBits,
 } = require('discord.js');
 
 const TOKEN     = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 
 const BANNIERE = 'https://i.imgur.com/bhzV8Xt.png';
+
+// ─── SEUILS D'ÉLIGIBILITÉ (valeurs par défaut, modifiables via /eligibiliteavis) ──
+let SEUIL_MESSAGES    = 20;
+let SEUIL_VOC_MINUTES = 30;
 
 // ─── Lien Helper ID → Salon casier ID ─────────────────────────────────────
 const CASIERS = {
@@ -26,20 +31,59 @@ const CASIERS = {
 };
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildVoiceStates,
+  ],
 });
 
 const tempData    = new Map();
-const avisData    = new Map();
+const avisData     = new Map();
 const casierMsgId = new Map();
 
-// ─── Commande slash ────────────────────────────────────────────────────────
+// ─── Tracking messages & vocal (maison, simple, en mémoire) ───────────────
+const messageCounts = new Map();
+const voiceMinutes  = new Map();
+const voiceJoinedAt = new Map();
+
+function getMessageCount(userId) {
+  return messageCounts.get(userId) || 0;
+}
+
+function getVoiceMinutes(userId) {
+  return voiceMinutes.get(userId) || 0;
+}
+
+function checkEligibilite(userId) {
+  const msgs = getMessageCount(userId);
+  const voc  = getVoiceMinutes(userId);
+  return {
+    eligible: msgs >= SEUIL_MESSAGES && voc >= SEUIL_VOC_MINUTES,
+    msgs,
+    voc,
+  };
+}
+
+// ─── Commandes slash ────────────────────────────────────────────────────────
 const commands = [
   new SlashCommandBuilder()
     .setName('helperavis')
     .setDescription('⭐ Donner un avis sur un helper')
     .addUserOption(option =>
       option.setName('helper').setDescription('Le helper qui vous a aidé').setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('eligibiliteavis')
+    .setDescription('🔧 Configurer les seuils requis pour laisser un avis (Admin)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .addIntegerOption(o =>
+      o.setName('seuil_messages').setDescription('Nombre de messages minimum requis').setRequired(true).setMinValue(0)
+    )
+    .addIntegerOption(o =>
+      o.setName('seuil_voc').setDescription('Minutes de vocal minimum requises').setRequired(true).setMinValue(0)
     ),
 ].map(cmd => cmd.toJSON());
 
@@ -48,14 +92,72 @@ const rest = new REST({ version: '10' }).setToken(TOKEN);
 client.once('ready', async () => {
   console.log(`✅ Connecté en tant que ${client.user.tag}`);
   await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
-  console.log('✅ Commande /helperavis enregistrée');
+  console.log('✅ Commandes /helperavis et /eligibiliteavis enregistrées');
+});
+
+// ─── Tracking : messages ───────────────────────────────────────────────────
+client.on('messageCreate', (message) => {
+  if (message.author.bot) return;
+  const userId = message.author.id;
+  messageCounts.set(userId, getMessageCount(userId) + 1);
+});
+
+// ─── Tracking : vocal ───────────────────────────────────────────────────────
+client.on('voiceStateUpdate', (oldState, newState) => {
+  const userId = newState.member?.id || oldState.member?.id;
+  if (!userId) return;
+  if (newState.member?.user.bot || oldState.member?.user.bot) return;
+
+  const oldChan = oldState.channelId;
+  const newChan = newState.channelId;
+
+  if (!oldChan && newChan) {
+    voiceJoinedAt.set(userId, Date.now());
+  } else if (oldChan && !newChan) {
+    const joined = voiceJoinedAt.get(userId);
+    if (joined) {
+      const minutes = Math.floor((Date.now() - joined) / 60000);
+      if (minutes > 0) voiceMinutes.set(userId, getVoiceMinutes(userId) + minutes);
+      voiceJoinedAt.delete(userId);
+    }
+  }
 });
 
 // ─── Interactions ──────────────────────────────────────────────────────────
 client.on('interactionCreate', async (interaction) => {
 
-  // 1. /helperavis → boutons étoiles avec le bon nombre d'étoiles
+  // /eligibiliteavis → change les seuils à la volée
+  if (interaction.isChatInputCommand() && interaction.commandName === 'eligibiliteavis') {
+    const nvMsg = interaction.options.getInteger('seuil_messages');
+    const nvVoc = interaction.options.getInteger('seuil_voc');
+
+    SEUIL_MESSAGES    = nvMsg;
+    SEUIL_VOC_MINUTES = nvVoc;
+
+    return interaction.reply({
+      content:
+        `✅ **Seuils mis à jour !**\n\n` +
+        `> 💬 Messages requis : **${SEUIL_MESSAGES}**\n` +
+        `> 🎙️ Vocal requis : **${SEUIL_VOC_MINUTES} minutes**`,
+      ephemeral: true,
+    });
+  }
+
+  // /helperavis → vérification éligibilité, puis boutons étoiles
   if (interaction.isChatInputCommand() && interaction.commandName === 'helperavis') {
+    const { eligible, msgs, voc } = checkEligibilite(interaction.user.id);
+
+    if (!eligible) {
+      return interaction.reply({
+        content:
+          `❌ **Tu n'es pas encore éligible pour laisser un avis.**\n\n` +
+          `> 💬 Messages : **${msgs} / ${SEUIL_MESSAGES}**\n` +
+          `> 🎙️ Vocal : **${voc} / ${SEUIL_VOC_MINUTES} minutes**\n\n` +
+          `Continue à participer sur le serveur, tu pourras laisser un avis une fois les seuils atteints !`,
+        ephemeral: true,
+      });
+    }
+
     const helper = interaction.options.getUser('helper');
     tempData.set(interaction.user.id, { helperId: helper.id });
 
@@ -74,7 +176,7 @@ client.on('interactionCreate', async (interaction) => {
     });
   }
 
-  // 2. Bouton étoile → modal
+  // Bouton étoile → modal
   if (interaction.isButton() && interaction.customId.startsWith('note_')) {
     const note = parseInt(interaction.customId.split('_')[1]);
     const data = tempData.get(interaction.user.id) || {};
@@ -94,7 +196,7 @@ client.on('interactionCreate', async (interaction) => {
     await interaction.showModal(modal);
   }
 
-  // 3. Modal soumis → embed public + mise à jour casier
+  // Modal soumis → embed public + mise à jour casier
   if (interaction.isModalSubmit() && interaction.customId === 'avis_modal') {
     const ressenti = interaction.fields.getTextInputValue('ressenti');
     const joueur   = interaction.user;
@@ -115,7 +217,6 @@ client.on('interactionCreate', async (interaction) => {
       note === 3 ? 0x00BFFF :
       note === 2 ? 0xFF6600 : 0xFF0000;
 
-    // ── Embed avis public ──
     const embedAvis = new EmbedBuilder()
       .setTitle('⚔️ AVIS HELPER')
       .setColor(couleur)
@@ -134,7 +235,6 @@ client.on('interactionCreate', async (interaction) => {
       embeds: [embedAvis],
     });
 
-    // ── Mise à jour stats ──
     if (!avisData.has(helperId)) {
       avisData.set(helperId, { total: 0, count: 0, notes: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 } });
     }
@@ -143,7 +243,6 @@ client.on('interactionCreate', async (interaction) => {
     stats.count += 1;
     stats.notes[note] += 1;
 
-    // ── Mise à jour casier ──
     const casierID = CASIERS[helperId];
     if (casierID) {
       const casierChannel = interaction.guild.channels.cache.get(casierID);
@@ -153,21 +252,18 @@ client.on('interactionCreate', async (interaction) => {
         const moyRound    = Math.round(moyenne);
         const moyEtoiles  = '⭐'.repeat(moyRound) + '✩'.repeat(5 - moyRound);
 
-        // Médaille selon moyenne
         const moyMedaille =
           moyRound === 5 ? '🥇 EXCELLENT' :
           moyRound === 4 ? '🥈 TRÈS BON'  :
           moyRound === 3 ? '🥉 BON'       :
           moyRound === 2 ? '⚠️ MOYEN'     : '❌ INSUFFISANT';
 
-        // Couleur selon moyenne
         const moyCouleur =
           moyRound === 5 ? 0xFFD700 :
           moyRound === 4 ? 0xFFA500 :
           moyRound === 3 ? 0x00BFFF :
           moyRound === 2 ? 0xFF6600 : 0xFF0000;
 
-        // Barre de progression
         const barre = (n) => {
           const pct = stats.count > 0 ? Math.round((stats.notes[n] / stats.count) * 10) : 0;
           return `${'⭐'.repeat(n)}  ${'▰'.repeat(pct)}${'▱'.repeat(10 - pct)}  **${stats.notes[n]}** avis`;
@@ -197,7 +293,6 @@ client.on('interactionCreate', async (interaction) => {
           .setFooter({ text: '🔄 Mis à jour automatiquement à chaque nouvel avis' })
           .setTimestamp();
 
-        // Supprime l'ancien message
         const ancienMsgId = casierMsgId.get(helperId);
         if (ancienMsgId) {
           try {
@@ -206,7 +301,6 @@ client.on('interactionCreate', async (interaction) => {
           } catch (e) {}
         }
 
-        // Envoie le nouveau
         const nouveauMsg = await casierChannel.send({ embeds: [embedCasier] });
         casierMsgId.set(helperId, nouveauMsg.id);
       }
