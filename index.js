@@ -19,9 +19,16 @@ const CLIENT_ID = process.env.CLIENT_ID;
 
 const BANNIERE = 'https://i.imgur.com/bhzV8Xt.png';
 
-// ─── SEUILS D'ÉLIGIBILITÉ (valeurs par défaut, modifiables via /eligibiliteavis) ──
-let SEUIL_MESSAGES    = 20;
-let SEUIL_VOC_MINUTES = 30;
+// ─── CONDITIONS PAR GIVEAWAY (10 slots) ───────────────────────────────────
+// Valeurs par défaut pour chaque slot 1 à 10
+const NB_SLOTS = 10;
+const giveawayConditions = new Map();
+for (let i = 1; i <= NB_SLOTS; i++) {
+  giveawayConditions.set(i, { messages: 20, voc: 30 }); // valeurs par défaut
+}
+
+// Pour ce TEST, /helperavis vérifie les conditions du slot n°1
+const SLOT_TESTE = 1;
 
 // ─── Lien Helper ID → Salon casier ID ─────────────────────────────────────
 const CASIERS = {
@@ -40,7 +47,7 @@ const client = new Client({
 });
 
 const tempData    = new Map();
-const avisData     = new Map();
+const avisData    = new Map();
 const casierMsgId = new Map();
 
 // ─── Tracking messages & vocal (maison, simple, en mémoire) ───────────────
@@ -56,13 +63,16 @@ function getVoiceMinutes(userId) {
   return voiceMinutes.get(userId) || 0;
 }
 
-function checkEligibilite(userId) {
+function checkEligibilite(userId, slot) {
+  const cond = giveawayConditions.get(slot);
   const msgs = getMessageCount(userId);
   const voc  = getVoiceMinutes(userId);
   return {
-    eligible: msgs >= SEUIL_MESSAGES && voc >= SEUIL_VOC_MINUTES,
+    eligible: msgs >= cond.messages && voc >= cond.voc,
     msgs,
     voc,
+    seuilMsg: cond.messages,
+    seuilVoc: cond.voc,
   };
 }
 
@@ -74,25 +84,31 @@ const commands = [
     .addUserOption(option =>
       option.setName('helper').setDescription('Le helper qui vous a aidé').setRequired(true)
     ),
+];
 
-  new SlashCommandBuilder()
-    .setName('eligibiliteavis')
-    .setDescription('🔧 Configurer les seuils requis pour laisser un avis (Admin)')
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-    .addIntegerOption(o =>
-      o.setName('seuil_messages').setDescription('Nombre de messages minimum requis').setRequired(true).setMinValue(0)
-    )
-    .addIntegerOption(o =>
-      o.setName('seuil_voc').setDescription('Minutes de vocal minimum requises').setRequired(true).setMinValue(0)
-    ),
-].map(cmd => cmd.toJSON());
+// Génère automatiquement /condition-giveaway1 à /condition-giveaway10
+for (let i = 1; i <= NB_SLOTS; i++) {
+  commands.push(
+    new SlashCommandBuilder()
+      .setName(`condition-giveaway${i}`)
+      .setDescription(`🔧 Définir les conditions du giveaway n°${i} (Admin)`)
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+      .addIntegerOption(o =>
+        o.setName('messages').setDescription('Nombre de messages minimum requis').setRequired(true).setMinValue(0)
+      )
+      .addIntegerOption(o =>
+        o.setName('voc').setDescription('Minutes de vocal minimum requises').setRequired(true).setMinValue(0)
+      )
+  );
+}
 
+const commandsJson = commands.map(cmd => cmd.toJSON());
 const rest = new REST({ version: '10' }).setToken(TOKEN);
 
 client.once('ready', async () => {
   console.log(`✅ Connecté en tant que ${client.user.tag}`);
-  await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
-  console.log('✅ Commandes /helperavis et /eligibiliteavis enregistrées');
+  await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commandsJson });
+  console.log(`✅ ${commandsJson.length} commandes enregistrées (helperavis + ${NB_SLOTS} condition-giveawayX)`);
 });
 
 // ─── Tracking : messages ───────────────────────────────────────────────────
@@ -126,33 +142,33 @@ client.on('voiceStateUpdate', (oldState, newState) => {
 // ─── Interactions ──────────────────────────────────────────────────────────
 client.on('interactionCreate', async (interaction) => {
 
-  // /eligibiliteavis → change les seuils à la volée
-  if (interaction.isChatInputCommand() && interaction.commandName === 'eligibiliteavis') {
-    const nvMsg = interaction.options.getInteger('seuil_messages');
-    const nvVoc = interaction.options.getInteger('seuil_voc');
+  // /condition-giveawayX → configure les seuils de CE slot précis
+  if (interaction.isChatInputCommand() && interaction.commandName.startsWith('condition-giveaway')) {
+    const slot = parseInt(interaction.commandName.replace('condition-giveaway', ''));
+    const nvMsg = interaction.options.getInteger('messages');
+    const nvVoc = interaction.options.getInteger('voc');
 
-    SEUIL_MESSAGES    = nvMsg;
-    SEUIL_VOC_MINUTES = nvVoc;
+    giveawayConditions.set(slot, { messages: nvMsg, voc: nvVoc });
 
     return interaction.reply({
       content:
-        `✅ **Seuils mis à jour !**\n\n` +
-        `> 💬 Messages requis : **${SEUIL_MESSAGES}**\n` +
-        `> 🎙️ Vocal requis : **${SEUIL_VOC_MINUTES} minutes**`,
+        `✅ **Conditions du giveaway n°${slot} mises à jour !**\n\n` +
+        `> 💬 Messages requis : **${nvMsg}**\n` +
+        `> 🎙️ Vocal requis : **${nvVoc} minutes**`,
       ephemeral: true,
     });
   }
 
-  // /helperavis → vérification éligibilité, puis boutons étoiles
+  // /helperavis → vérifie les conditions du SLOT_TESTE (slot 1 pour ce test)
   if (interaction.isChatInputCommand() && interaction.commandName === 'helperavis') {
-    const { eligible, msgs, voc } = checkEligibilite(interaction.user.id);
+    const { eligible, msgs, voc, seuilMsg, seuilVoc } = checkEligibilite(interaction.user.id, SLOT_TESTE);
 
     if (!eligible) {
       return interaction.reply({
         content:
-          `❌ **Tu n'es pas encore éligible pour laisser un avis.**\n\n` +
-          `> 💬 Messages : **${msgs} / ${SEUIL_MESSAGES}**\n` +
-          `> 🎙️ Vocal : **${voc} / ${SEUIL_VOC_MINUTES} minutes**\n\n` +
+          `❌ **Tu n'es pas encore éligible pour laisser un avis.** (test slot giveaway n°${SLOT_TESTE})\n\n` +
+          `> 💬 Messages : **${msgs} / ${seuilMsg}**\n` +
+          `> 🎙️ Vocal : **${voc} / ${seuilVoc} minutes**\n\n` +
           `Continue à participer sur le serveur, tu pourras laisser un avis une fois les seuils atteints !`,
         ephemeral: true,
       });
